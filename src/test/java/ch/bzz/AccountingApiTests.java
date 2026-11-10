@@ -1,7 +1,11 @@
 package ch.bzz;
 
+import ch.bzz.model.Project;
+import ch.bzz.repository.ProjectRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import ch.bzz.model.Project;
+import ch.bzz.repository.ProjectRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,9 +19,11 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.options;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -30,6 +36,9 @@ class AccountingApiTests {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private ProjectRepository projectRepository;
 
     private String projectName;
     private String token;
@@ -62,6 +71,33 @@ class AccountingApiTests {
         mockMvc.perform(get("/api/hello"))
                 .andExpect(status().isOk())
                 .andExpect(content().string("Hello World!"));
+    }
+
+    @Test
+    void projectPasswordsAreStoredAsBcryptHashes() {
+        Project project = projectRepository.findById(projectName).orElseThrow();
+        assertThat(project.getPasswordHash())
+                .startsWith("$2")
+                .isNotEqualTo("secret");
+    }
+
+    @Test
+    void rejectsTamperedBearerToken() throws Exception {
+        mockMvc.perform(get("/accounts").header("Authorization", "Bearer invalid"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void allowsConfiguredFrontendCorsPreflight() throws Exception {
+        mockMvc.perform(options("/accounts")
+                        .header("Origin", "https://alexanderpeter.github.io")
+                        .header("Access-Control-Request-Method", "GET")
+                        .header("Access-Control-Request-Headers", "authorization"))
+                .andExpect(status().isOk())
+                .andExpect(header().string(
+                        "Access-Control-Allow-Origin",
+                        "https://alexanderpeter.github.io"
+                ));
     }
 
     @Test

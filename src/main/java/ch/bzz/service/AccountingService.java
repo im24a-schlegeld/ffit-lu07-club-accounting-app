@@ -1,226 +1,245 @@
 package ch.bzz.service;
 
-import ch.bzz.model.ApiModels.AccessTokenResponse;
-import ch.bzz.model.ApiModels.Account;
-import ch.bzz.model.ApiModels.AccountUpdate;
-import ch.bzz.model.ApiModels.Booking;
-import ch.bzz.model.ApiModels.BookingUpdate;
-import ch.bzz.model.ApiModels.LoginRequest;
+import ch.bzz.generated.model.AccountUpdate;
+import ch.bzz.generated.model.BookingUpdate;
+import ch.bzz.generated.model.LoginRequest;
+import ch.bzz.generated.model.UpdateAccountsRequest;
+import ch.bzz.generated.model.UpdateBookingsRequest;
+import ch.bzz.model.Account;
+import ch.bzz.model.Booking;
+import ch.bzz.model.Project;
+import ch.bzz.repository.AccountRepository;
+import ch.bzz.repository.BookingRepository;
+import ch.bzz.repository.ProjectRepository;
+import lombok.extern.slf4j.Slf4j;
+import org.openapitools.jackson.nullable.JsonNullable;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
-import javax.crypto.SecretKeyFactory;
-import javax.crypto.spec.PBEKeySpec;
-import java.security.GeneralSecurityException;
-import java.security.MessageDigest;
-import java.security.SecureRandom;
+import java.math.BigDecimal;
 import java.time.LocalDate;
-import java.util.Arrays;
-import java.util.Base64;
-import java.util.Comparator;
-import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Set;
 
 @Service
+@Slf4j
 public class AccountingService {
 
-    private static final int PASSWORD_ITERATIONS = 120_000;
-    private static final int PASSWORD_KEY_BITS = 256;
-    private static final int SALT_BYTES = 16;
-    private static final int TOKEN_BYTES = 32;
+    private final ProjectRepository projectRepository;
+    private final AccountRepository accountRepository;
+    private final BookingRepository bookingRepository;
+    private final JwtUtil jwtUtil;
+    private final PasswordEncoder passwordEncoder;
 
-    private final SecureRandom secureRandom = new SecureRandom();
-    private final Map<String, ProjectData> projects = new ConcurrentHashMap<>();
-    private final Map<String, String> tokenProjects = new ConcurrentHashMap<>();
+    public AccountingService(
+            ProjectRepository projectRepository,
+            AccountRepository accountRepository,
+            BookingRepository bookingRepository,
+            JwtUtil jwtUtil,
+            PasswordEncoder passwordEncoder
+    ) {
+        this.projectRepository = projectRepository;
+        this.accountRepository = accountRepository;
+        this.bookingRepository = bookingRepository;
+        this.jwtUtil = jwtUtil;
+        this.passwordEncoder = passwordEncoder;
+    }
 
+    @Transactional
     public void createProject(LoginRequest request) {
-        if (request == null || isBlank(request.projectName()) || isBlank(request.password())) {
+        if (request == null || isBlank(request.getProjectName()) || isBlank(request.getPassword())) {
             throw badRequest("project_name and password are required");
         }
-
-        ProjectData project = new ProjectData(hashPassword(request.password()));
-        if (projects.putIfAbsent(request.projectName(), project) != null) {
+        if (projectRepository.existsById(request.getProjectName())) {
             throw badRequest("Project already exists");
         }
+
+        Project project = new Project();
+        project.setProjectName(request.getProjectName());
+        project.setPasswordHash(passwordEncoder.encode(request.getPassword()));
+        projectRepository.save(project);
+        log.info("Created accounting project {}", request.getProjectName());
     }
 
-    public AccessTokenResponse login(LoginRequest request) {
-        if (request == null || isBlank(request.projectName()) || isBlank(request.password())) {
-            throw unauthorized();
+    @Transactional(readOnly = true)
+    public String login(LoginRequest request) {
+        if (request == null || isBlank(request.getProjectName()) || isBlank(request.getPassword())) {
+            throw unauthorized("Invalid credentials");
         }
 
-        ProjectData project = projects.get(request.projectName());
-        if (project == null || !passwordMatches(request.password(), project.passwordHash)) {
-            throw unauthorized();
+        Project project = projectRepository.findById(request.getProjectName())
+                .orElseThrow(() -> unauthorized("Invalid credentials"));
+        if (!passwordEncoder.matches(request.getPassword(), project.getPasswordHash())) {
+            throw unauthorized("Invalid credentials");
         }
 
-        String token = issueToken(request.projectName());
-        return new AccessTokenResponse(token);
+        log.info("Project {} logged in", project.getProjectName());
+        return jwtUtil.generateToken(project.getProjectName());
     }
 
-    public List<Account> getAccounts(String authorization) {
-        ProjectData project = authenticatedProject(authorization);
-        synchronized (project) {
-            return project.accounts.values().stream()
-                    .sorted(Comparator.comparing(Account::number))
-                    .toList();
-        }
+    @Transactional(readOnly = true)
+    public List<ch.bzz.generated.model.Account> getAccounts(String authorization) {
+        String projectName = authenticatedProjectName(authorization);
+        return accountRepository.findByProject_ProjectNameOrderByAccountNumberAsc(projectName)
+                .stream()
+                .map(this::toApiAccount)
+                .toList();
     }
 
-    public void updateAccounts(String authorization, List<AccountUpdate> updates) {
-        ProjectData project = authenticatedProject(authorization);
-        if (updates == null) {
+    @Transactional
+    public void updateAccounts(String authorization, UpdateAccountsRequest request) {
+        String projectName = authenticatedProjectName(authorization);
+        if (request == null || request.getAccounts() == null) {
             throw badRequest("accounts is required");
         }
 
-        synchronized (project) {
-            Map<Integer, Account> changed = new HashMap<>(project.accounts);
-            for (AccountUpdate update : updates) {
-                if (update == null || update.number() == null) {
-                    throw badRequest("Every account update requires a number");
-                }
-
-                Account current = changed.get(update.number());
-                String name = update.name() != null
-                        ? update.name()
-                        : current == null ? null : current.name();
-                if (name == null) {
-                    throw badRequest("A new account requires a name");
-                }
-                changed.put(update.number(), new Account(update.number(), name));
+        Project project = projectRepository.getReferenceById(projectName);
+        List<Account> updates = new ArrayList<>();
+        Set<Integer> numbers = new HashSet<>();
+        for (AccountUpdate update : request.getAccounts()) {
+            if (update == null || update.getNumber() == null || update.getNumber() <= 0) {
+                throw badRequest("Every account update requires a positive number");
             }
-            project.accounts.clear();
-            project.accounts.putAll(changed);
+            if (!numbers.add(update.getNumber())) {
+                throw badRequest("Account numbers must not be repeated");
+            }
+
+            Account account = accountRepository
+                    .findByAccountNumberAndProject_ProjectName(update.getNumber(), projectName)
+                    .orElseGet(Account::new);
+            JsonNullable<String> nameValue = update.getName();
+            String name = nameValue != null && nameValue.isPresent()
+                    ? nameValue.get()
+                    : account.getName();
+            if (isBlank(name)) {
+                throw badRequest("A new account requires a name");
+            }
+
+            account.setAccountNumber(update.getNumber());
+            account.setName(name);
+            account.setProject(project);
+            updates.add(account);
         }
+
+        accountRepository.saveAll(updates);
+        log.info("Saved {} account updates for project {}", updates.size(), projectName);
     }
 
-    public List<Booking> getBookings(String authorization) {
-        ProjectData project = authenticatedProject(authorization);
-        synchronized (project) {
-            return project.bookings.values().stream()
-                    .sorted(Comparator.comparing(Booking::number))
-                    .toList();
-        }
+    @Transactional(readOnly = true)
+    public List<ch.bzz.generated.model.Booking> getBookings(String authorization) {
+        String projectName = authenticatedProjectName(authorization);
+        return bookingRepository.findByProject_ProjectNameOrderByBookingNumberAsc(projectName)
+                .stream()
+                .map(this::toApiBooking)
+                .toList();
     }
 
-    public void updateBookings(String authorization, List<BookingUpdate> updates) {
-        ProjectData project = authenticatedProject(authorization);
-        if (updates == null) {
+    @Transactional
+    public void updateBookings(String authorization, UpdateBookingsRequest request) {
+        String projectName = authenticatedProjectName(authorization);
+        if (request == null || request.getEntries() == null) {
             throw badRequest("entries is required");
         }
 
-        synchronized (project) {
-            Map<Integer, Booking> changed = new HashMap<>(project.bookings);
-            for (BookingUpdate update : updates) {
-                if (update == null) {
-                    throw badRequest("Booking updates must not be null");
-                }
-
-                Integer number = update.id() != null ? update.id() : nextBookingNumber(changed);
-                Booking current = changed.get(number);
-                LocalDate date = update.date() != null ? update.date() : valueOf(current, Booking::date);
-                String text = update.text() != null ? update.text() : valueOf(current, Booking::text);
-                Integer debit = update.debit() != null ? update.debit() : valueOf(current, Booking::debit);
-                Integer credit = update.credit() != null ? update.credit() : valueOf(current, Booking::credit);
-                var amount = update.amount() != null ? update.amount() : valueOf(current, Booking::amount);
-
-                if (date == null || text == null || debit == null || credit == null || amount == null) {
-                    throw badRequest("A new booking requires date, text, debit, credit, and amount");
-                }
-                if (!project.accounts.containsKey(debit) || !project.accounts.containsKey(credit)) {
-                    throw badRequest("Both booking accounts must exist in this project");
-                }
-                changed.put(number, new Booking(number, date, text, debit, credit, amount));
-            }
-            project.bookings.clear();
-            project.bookings.putAll(changed);
-        }
-    }
-
-    private ProjectData authenticatedProject(String authorization) {
-        if (authorization == null || !authorization.startsWith("Bearer ")) {
-            throw unauthorized();
-        }
-
-        String token = authorization.substring("Bearer ".length()).trim();
-        String projectName = tokenProjects.get(token);
-        ProjectData project = projectName == null ? null : projects.get(projectName);
-        if (project == null) {
-            throw unauthorized();
-        }
-        return project;
-    }
-
-    private String hashPassword(String password) {
-        byte[] salt = new byte[SALT_BYTES];
-        secureRandom.nextBytes(salt);
-        char[] passwordCharacters = password.toCharArray();
-        PBEKeySpec spec = new PBEKeySpec(passwordCharacters, salt, PASSWORD_ITERATIONS, PASSWORD_KEY_BITS);
-        try {
-            byte[] hash = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).getEncoded();
-            Base64.Encoder encoder = Base64.getUrlEncoder().withoutPadding();
-            return PASSWORD_ITERATIONS + "$" + encoder.encodeToString(salt) + "$" + encoder.encodeToString(hash);
-        } catch (GeneralSecurityException exception) {
-            throw new IllegalStateException("Password hashing is unavailable", exception);
-        } finally {
-            spec.clearPassword();
-            Arrays.fill(passwordCharacters, '\0');
-        }
-    }
-
-    private boolean passwordMatches(String password, String storedHash) {
-        String[] parts = storedHash.split("\\$");
-        if (parts.length != 3) {
-            return false;
-        }
-
-        try {
-            int iterations = Integer.parseInt(parts[0]);
-            Base64.Decoder decoder = Base64.getUrlDecoder();
-            byte[] salt = decoder.decode(parts[1]);
-            byte[] expected = decoder.decode(parts[2]);
-            char[] passwordCharacters = password.toCharArray();
-            PBEKeySpec spec = new PBEKeySpec(passwordCharacters, salt, iterations, expected.length * Byte.SIZE);
-            try {
-                byte[] actual = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-                        .generateSecret(spec).getEncoded();
-                return MessageDigest.isEqual(expected, actual);
-            } finally {
-                spec.clearPassword();
-                Arrays.fill(passwordCharacters, '\0');
-            }
-        } catch (IllegalArgumentException | GeneralSecurityException exception) {
-            throw new IllegalStateException("Stored password hash cannot be verified", exception);
-        }
-    }
-
-    private String issueToken(String projectName) {
-        byte[] bytes = new byte[TOKEN_BYTES];
-        String token;
-        do {
-            secureRandom.nextBytes(bytes);
-            token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-        } while (tokenProjects.putIfAbsent(token, projectName) != null);
-        return token;
-    }
-
-    private Integer nextBookingNumber(Map<Integer, Booking> bookings) {
-        return bookings.keySet().stream().max(Integer::compareTo)
-                .map(number -> {
-                    try {
-                        return Math.addExact(number, 1);
-                    } catch (ArithmeticException exception) {
-                        throw badRequest("No further booking number is available");
-                    }
-                })
+        Project project = projectRepository.getReferenceById(projectName);
+        List<Booking> updates = new ArrayList<>();
+        Set<Integer> numbers = new HashSet<>();
+        int nextNumber = bookingRepository
+                .findFirstByProject_ProjectNameOrderByBookingNumberDesc(projectName)
+                .map(booking -> incrementBookingNumber(booking.getBookingNumber()))
                 .orElse(1);
+
+        for (BookingUpdate update : request.getEntries()) {
+            if (update == null) {
+                throw badRequest("Booking updates must not be null");
+            }
+
+            Integer number = update.getId() == null ? nextNumber : update.getId();
+            if (number <= 0 || !numbers.add(number)) {
+                throw badRequest("Booking numbers must be positive and unique in each update");
+            }
+            if (number >= nextNumber) {
+                nextNumber = incrementBookingNumber(number);
+            }
+            Booking booking = bookingRepository
+                    .findByBookingNumberAndProject_ProjectName(number, projectName)
+                    .orElseGet(Booking::new);
+
+            LocalDate date = valueOrExisting(update.getDate(), booking.getDate());
+            String text = valueOrExisting(update.getText(), booking.getText());
+            Integer debitNumber = valueOrExisting(update.getDebit(), accountNumber(booking.getDebitAccount()));
+            Integer creditNumber = valueOrExisting(update.getCredit(), accountNumber(booking.getCreditAccount()));
+            Double amount = valueOrExisting(update.getAmount(), amountValue(booking.getAmount()));
+            if (date == null || isBlank(text) || debitNumber == null || creditNumber == null || amount == null) {
+                throw badRequest("A new booking requires date, text, debit, credit, and amount");
+            }
+
+            Account debit = accountRepository
+                    .findByAccountNumberAndProject_ProjectName(debitNumber, projectName)
+                    .orElseThrow(() -> badRequest("Debit account does not exist in this project"));
+            Account credit = accountRepository
+                    .findByAccountNumberAndProject_ProjectName(creditNumber, projectName)
+                    .orElseThrow(() -> badRequest("Credit account does not exist in this project"));
+
+            booking.setBookingNumber(number);
+            booking.setDate(date);
+            booking.setText(text);
+            booking.setDebitAccount(debit);
+            booking.setCreditAccount(credit);
+            booking.setAmount(BigDecimal.valueOf(amount));
+            booking.setProject(project);
+            updates.add(booking);
+        }
+
+        bookingRepository.saveAll(updates);
+        log.info("Saved {} booking updates for project {}", updates.size(), projectName);
     }
 
-    private static <T> T valueOf(Booking booking, java.util.function.Function<Booking, T> getter) {
-        return booking == null ? null : getter.apply(booking);
+    private String authenticatedProjectName(String authorization) {
+        String projectName = jwtUtil.verifyTokenAndExtractSubject(authorization);
+        if (projectName == null || !projectRepository.existsById(projectName)) {
+            throw unauthorized("Invalid token");
+        }
+        return projectName;
+    }
+
+    private ch.bzz.generated.model.Account toApiAccount(Account account) {
+        return new ch.bzz.generated.model.Account(account.getAccountNumber(), account.getName());
+    }
+
+    private ch.bzz.generated.model.Booking toApiBooking(Booking booking) {
+        return new ch.bzz.generated.model.Booking(
+                booking.getBookingNumber(),
+                booking.getDate(),
+                booking.getText(),
+                booking.getDebitAccount().getAccountNumber(),
+                booking.getCreditAccount().getAccountNumber(),
+                booking.getAmount().doubleValue()
+        );
+    }
+
+    private static Integer accountNumber(Account account) {
+        return account == null ? null : account.getAccountNumber();
+    }
+
+    private static Double amountValue(BigDecimal amount) {
+        return amount == null ? null : amount.doubleValue();
+    }
+
+    private static <T> T valueOrExisting(JsonNullable<T> update, T existing) {
+        return update != null && update.isPresent() ? update.get() : existing;
+    }
+
+    private static int incrementBookingNumber(Integer current) {
+        if (current == Integer.MAX_VALUE) {
+            throw badRequest("No further booking number is available");
+        }
+        return current + 1;
     }
 
     private static boolean isBlank(String value) {
@@ -231,17 +250,7 @@ public class AccountingService {
         return new ResponseStatusException(HttpStatus.BAD_REQUEST, message);
     }
 
-    private static ResponseStatusException unauthorized() {
-        return new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid credentials");
-    }
-
-    private static final class ProjectData {
-        private final String passwordHash;
-        private final Map<Integer, Account> accounts = new HashMap<>();
-        private final Map<Integer, Booking> bookings = new HashMap<>();
-
-        private ProjectData(String passwordHash) {
-            this.passwordHash = passwordHash;
-        }
+    private static ResponseStatusException unauthorized(String message) {
+        return new ResponseStatusException(HttpStatus.UNAUTHORIZED, message);
     }
 }
