@@ -2,6 +2,7 @@ plugins {
     id 'java'
     id 'org.springframework.boot' version '3.3.4'
     id 'io.spring.dependency-management' version '1.1.6'
+    id 'org.openapi.generator' version '7.7.0'
 }
 group = 'ch.bzz'
 version = '1.0-SNAPSHOT'
@@ -12,14 +13,54 @@ repositories {
     mavenCentral()
 }
 
+sourceSets {
+    main {
+        java {
+            srcDir "$buildDir/generated/openapi/src/main/java"
+        }
+    }
+}
+
 dependencies {
     // dependencies for the application
     implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.security:spring-security-crypto'
+    implementation 'org.postgresql:postgresql:42.7.3'
+    implementation 'io.swagger.core.v3:swagger-annotations:2.2.21'
+    implementation 'org.openapitools:jackson-databind-nullable:0.2.6'
+    implementation 'io.jsonwebtoken:jjwt-api:0.11.5'
+    runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.11.5'
+    runtimeOnly 'io.jsonwebtoken:jjwt-jackson:0.11.5'
+    runtimeOnly 'com.h2database:h2'
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+    testCompileOnly 'org.projectlombok:lombok'
+    testAnnotationProcessor 'org.projectlombok:lombok'
 
     // dependencies for testing
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
 
+compileJava.dependsOn tasks.openApiGenerate
+
 test {
     useJUnitPlatform()
+}
+
+openApiGenerate {
+    generatorName = 'spring'
+    inputSpec = file("$projectDir/documentation/openapi.yaml").toURI().toString()
+    outputDir = layout.buildDirectory.dir("generated/openapi").get().asFile.absolutePath
+    apiPackage = 'ch.bzz.generated.api'
+    modelPackage = 'ch.bzz.generated.model'
+    configOptions = [
+            interfaceOnly: 'true',
+            useJakartaEe: 'true',
+            useTags: 'true',
+            dateLibrary: 'java8',
+            skipDefaultInterface: 'true',
+            hideGenerationTimestamp: 'true'
+    ]
 }
