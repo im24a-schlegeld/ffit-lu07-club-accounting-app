@@ -1,0 +1,249 @@
+openapi: 3.0.3
+info:
+  title: Club Accounting App API
+  version: 1.0.0
+  description: >
+    REST API for a web based accounting application.
+servers:
+  - url: https://localhost:8443
+    description: Local development environment (HTTPS)
+  - url: http://localhost:8080
+    description: Local development environment (HTTP)
+
+paths:
+  /projects:
+    post:
+      tags:
+        - Project
+      summary: Create a new accounting project
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "201":
+          description: Project successfully created
+        "400":
+          description: Invalid input
+
+  /login:
+    post:
+      tags:
+        - Project
+      summary: Log in to an existing accounting project
+      operationId: loginProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Logged in successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+        "401":
+          description: Invalid credentials
+
+  /accounts:
+    get:
+      tags:
+        - Account
+      summary: Get all accounts of this accounting project
+      operationId: getAccounts
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of accounts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Account"
+        "401":
+          description: Missing or invalid bearer token
+    put:
+      tags:
+        - Account
+      summary: Save adjusted accounts
+      operationId: updateAccounts
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accounts]
+              properties:
+                accounts:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/AccountUpdate"
+      responses:
+        "200":
+          description: Changes saved successfully
+        "400":
+          description: Invalid account data
+        "401":
+          description: Missing or invalid bearer token
+
+  /bookings:
+    get:
+      tags:
+        - Booking
+      summary: Get all bookings of this accounting project
+      operationId: getBookings
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of bookings
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Booking"
+        "401":
+          description: Missing or invalid bearer token
+    put:
+      tags:
+        - Booking
+      summary: Save adjusted bookings
+      operationId: updateBookings
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entries]
+              properties:
+                entries:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/BookingUpdate"
+      responses:
+        "200":
+          description: Changes saved successfully
+        "400":
+          description: Invalid booking data
+        "401":
+          description: Missing or invalid bearer token
+
+components:
+  schemas:
+    LoginRequest:
+      type: object
+      required: [project_name, password]
+      properties:
+        project_name:
+          type: string
+          example: Hobby_Horsing_Horgen
+        password:
+          type: string
+          format: password
+          example: geheim123
+
+    Account:
+      type: object
+      required: [number, name]
+      properties:
+        number:
+          type: integer
+          example: 1000
+        name:
+          type: string
+          example: Kasse
+
+    AccountUpdate:
+      type: object
+      required: [number]
+      properties:
+        number:
+          type: integer
+          example: 1020
+        name:
+          type: string
+          nullable: true
+          example: Bank
+
+    Booking:
+      type: object
+      required: [number, date, text, debit, credit, amount]
+      properties:
+        number:
+          type: integer
+          example: 15
+        date:
+          type: string
+          format: date
+          example: 2025-03-15
+        text:
+          type: string
+          example: Bargeld abgehoben
+        debit:
+          type: integer
+          example: 1000
+        credit:
+          type: integer
+          example: 1020
+        amount:
+          type: number
+          format: double
+          example: 200.00
+
+    BookingUpdate:
+      type: object
+      properties:
+        id:
+          type: integer
+          example: 17
+        date:
+          type: string
+          format: date
+          nullable: true
+        text:
+          type: string
+          nullable: true
+        debit:
+          type: integer
+          nullable: true
+        credit:
+          type: integer
+          nullable: true
+        amount:
+          type: number
+          format: double
+          nullable: true
