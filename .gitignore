@@ -36,3 +36,6 @@ gradle-app.log
 Thumbs.db
 
 # === Other ===
+/data/
+app.log
+/src/main/resources/keystore/keystore.p12
